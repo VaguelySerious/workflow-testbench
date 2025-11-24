@@ -1,12 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import {
-	Card,
-	CardContent,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Trash2 } from "lucide-react";
 
@@ -56,7 +51,7 @@ export function TerminalLog({ logs, onClear }: TerminalLogProps) {
 
 	const getLogPrefix = (entry: LogEntry) => {
 		const time = formatTimestamp(entry.timestamp);
-		const runIdPart = entry.runId ? `[${entry.runId.substring(0, 8)}]` : "";
+		const runIdPart = entry.runId ? `[${entry.runId}]` : "";
 
 		switch (entry.type) {
 			case "error":
@@ -101,4 +96,3 @@ export function TerminalLog({ logs, onClear }: TerminalLogProps) {
 		</Card>
 	);
 }
-

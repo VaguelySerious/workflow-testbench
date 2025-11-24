@@ -23,6 +23,12 @@ import {
 
 export async function add(a: number, b: number) {
 	"use step";
+
+	const writable = getWritable();
+	const writer = writable.getWriter();
+	await writer.write(new TextEncoder().encode(`adding ${a} and ${b}\n`));
+	writer.releaseLock();
+
 	return a + b;
 }
 

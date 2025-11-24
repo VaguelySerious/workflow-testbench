@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getWorkflowRun } from "workflow/api";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
+import { getRun } from "workflow/api";
 
 export async function POST(request: NextRequest) {
 	try {
@@ -7,24 +8,21 @@ export async function POST(request: NextRequest) {
 		const { runId } = body as { runId: string };
 
 		if (!runId) {
-			return NextResponse.json(
-				{ error: "runId is required" },
-				{ status: 400 }
-			);
+			return NextResponse.json({ error: "runId is required" }, { status: 400 });
 		}
 
 		// Get the workflow run
-		const run = await getWorkflowRun(runId);
+		const run = await getRun(runId);
 
 		if (!run) {
 			return NextResponse.json(
 				{ error: `Workflow run "${runId}" not found` },
-				{ status: 404 }
+				{ status: 404 },
 			);
 		}
 
 		// Await the result
-		const result = await run.result();
+		const result = await run.returnValue;
 
 		return NextResponse.json({
 			runId,
@@ -38,8 +36,7 @@ export async function POST(request: NextRequest) {
 				error: "Failed to await workflow",
 				details: error instanceof Error ? error.message : String(error),
 			},
-			{ status: 500 }
+			{ status: 500 },
 		);
 	}
 }
-

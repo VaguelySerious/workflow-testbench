@@ -1,11 +1,6 @@
 "use client";
 
-import {
-	Card,
-	CardContent,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,15 +8,28 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Loader2, CheckCircle2, XCircle, Unplug, RefreshCw } from "lucide-react";
+import {
+	Loader2,
+	CheckCircle2,
+	XCircle,
+	Unplug,
+	RefreshCw,
+} from "lucide-react";
 
 export interface Invocation {
 	runId: string;
 	workflowName: string;
-	status: "invoked" | "streaming" | "disconnected" | "stream_complete" | "done" | "error";
+	status:
+		| "invoked"
+		| "streaming"
+		| "disconnected"
+		| "stream_complete"
+		| "done"
+		| "error";
 	startTime: Date;
 	endTime?: Date;
 	result?: unknown;
+	error?: string;
 }
 
 interface InvocationsPanelProps {
@@ -59,7 +67,11 @@ export function InvocationsPanel({
 		}
 	};
 
-	const getStatusBadge = (status: Invocation["status"], result?: unknown) => {
+	const getStatusBadge = (
+		status: Invocation["status"],
+		result?: unknown,
+		error?: string,
+	) => {
 		const variants = {
 			invoked: "secondary" as const,
 			streaming: "secondary" as const,
@@ -80,9 +92,32 @@ export function InvocationsPanel({
 
 		if (status === "done" && result !== undefined) {
 			return (
-				<div title={JSON.stringify(result, null, 2)}>
-					{badge}
-				</div>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="cursor-help">{badge}</div>
+					</TooltipTrigger>
+					<TooltipContent side="left" className="max-w-md">
+						<pre className="text-xs whitespace-pre-wrap">
+							{JSON.stringify(result, null, 2)}
+						</pre>
+					</TooltipContent>
+				</Tooltip>
+			);
+		}
+
+		if ((status === "error" || status === "disconnected") && error) {
+			return (
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="cursor-help">{badge}</div>
+					</TooltipTrigger>
+					<TooltipContent side="left" className="max-w-md bg-destructive">
+						<div className="space-y-1">
+							<div className="font-semibold">Error Details:</div>
+							<div className="text-xs whitespace-pre-wrap">{error}</div>
+						</div>
+					</TooltipContent>
+				</Tooltip>
 			);
 		}
 
@@ -98,7 +133,8 @@ export function InvocationsPanel({
 				<div className="h-full overflow-y-auto space-y-2">
 					{invocations.length === 0 ? (
 						<div className="text-sm text-muted-foreground">
-							No workflow runs yet. Click "Start" on any workflow to begin.
+							No workflow runs yet. Click &quot;Start&quot; on any workflow to
+							begin.
 						</div>
 					) : (
 						invocations.map((invocation) => {
@@ -116,10 +152,14 @@ export function InvocationsPanel({
 								>
 									<div className="flex items-center justify-between gap-2">
 										<span className="font-mono text-xs truncate flex-1">
-											{invocation.runId.substring(0, 12)}...
+											{invocation.runId}...
 										</span>
 										<div className="flex items-center gap-1">
-											{getStatusBadge(invocation.status, invocation.result)}
+											{getStatusBadge(
+												invocation.status,
+												invocation.result,
+												invocation.error,
+											)}
 											{isStreaming && onDisconnect && (
 												<Tooltip>
 													<TooltipTrigger asChild>
@@ -149,9 +189,7 @@ export function InvocationsPanel({
 															<RefreshCw className="h-3 w-3" />
 														</Button>
 													</TooltipTrigger>
-													<TooltipContent>
-														Reconnect to stream
-													</TooltipContent>
+													<TooltipContent>Reconnect to stream</TooltipContent>
 												</Tooltip>
 											)}
 										</div>
@@ -176,4 +214,3 @@ export function InvocationsPanel({
 		</Card>
 	);
 }
-

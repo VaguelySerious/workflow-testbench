@@ -71,7 +71,12 @@ export function useWorkflowInvocations() {
   );
 
   const updateInvocationStatus = useCallback(
-    (runId: string, status: Invocation["status"], result?: unknown) => {
+    (
+      runId: string,
+      status: Invocation["status"],
+      result?: unknown,
+      error?: string
+    ) => {
       setInvocations((prev) =>
         prev.map((inv) =>
           inv.runId === runId
@@ -83,6 +88,7 @@ export function useWorkflowInvocations() {
                     ? new Date()
                     : inv.endTime,
                 result: result !== undefined ? result : inv.result,
+                error: error !== undefined ? error : inv.error,
               }
             : inv
         )

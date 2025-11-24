@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 
 /**
  * Generic hook for using localStorage with React state
+ * Handles SSR hydration properly by loading from localStorage after mount
  */
 export function useLocalStorage<T>(
   key: string,
@@ -14,31 +15,37 @@ export function useLocalStorage<T>(
   const serializer = options?.serializer ?? JSON.stringify;
   const deserializer = options?.deserializer ?? JSON.parse;
 
-  // Initialize state with value from localStorage or initial value
-  const [storedValue, setStoredValue] = useState<T>(() => {
-    if (typeof window === "undefined") {
-      return initialValue;
-    }
+  // Always start with initial value to match SSR
+  const [storedValue, setStoredValue] = useState<T>(initialValue);
+  const [isHydrated, setIsHydrated] = useState(false);
 
-    try {
-      const item = window.localStorage.getItem(key);
-      return item ? deserializer(item) : initialValue;
-    } catch (error) {
-      console.error(`Error loading localStorage key "${key}":`, error);
-      return initialValue;
-    }
-  });
-
-  // Save to localStorage whenever value changes
+  // Load from localStorage after hydration (runs once on mount)
   useEffect(() => {
     if (typeof window !== "undefined") {
+      try {
+        const item = window.localStorage.getItem(key);
+        if (item) {
+          setStoredValue(deserializer(item));
+        }
+      } catch (error) {
+        console.error(`Error loading localStorage key "${key}":`, error);
+      }
+      setIsHydrated(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  // Save to localStorage whenever value changes (but not on initial hydration load)
+  useEffect(() => {
+    if (typeof window !== "undefined" && isHydrated) {
       try {
         window.localStorage.setItem(key, serializer(storedValue));
       } catch (error) {
         console.error(`Error saving localStorage key "${key}":`, error);
       }
     }
-  }, [key, storedValue, serializer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, storedValue, isHydrated]);
 
   // Clear function to remove from localStorage
   const clearValue = useCallback(() => {
