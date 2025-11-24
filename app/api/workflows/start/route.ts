@@ -44,8 +44,6 @@ export async function POST(request: NextRequest) {
 		// @ts-expect-error - we're doing arbitrary calls to unknown functions
 		const run = await start(workflowFn, workflowArgs);
 
-		console.log("Start returned:", typeof run, run);
-
 		if (!run) {
 			return NextResponse.json(
 				{ error: "Failed to get workflow run" },
@@ -53,44 +51,47 @@ export async function POST(request: NextRequest) {
 			);
 		}
 
-		// Extract run ID from the Run object
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const runObj = run as any;
-		const runId =
-			typeof run === "string"
-				? run
-				: runObj?.runId || runObj?.id || String(run);
-		console.log("Extracted runId:", runId);
+		// Create a stream that properly closes when workflow completes
 
-		// Try to get the stream using the stream() method if it exists
-		let stream: ReadableStream | null = null;
-		if (typeof runObj.stream === "function") {
-			try {
-				stream = runObj.stream();
-				console.log("Got stream from run.stream()");
-			} catch (error) {
-				console.error("Error calling run.stream():", error);
-			}
-		}
+		const stream = new ReadableStream({
+			async start(controller) {
+				try {
+					const reader = run.readable.getReader();
 
-		// If there's a readable stream, return it with the run ID
-		if (stream) {
-			console.log("Returning stream response with runId:", runId);
-			return new Response(stream, {
-				headers: {
-					"Content-Type": "text/event-stream",
-					"Cache-Control": "no-cache",
-					Connection: "keep-alive",
-					"X-Workflow-Run-Id": runId,
-				},
-			});
-		}
+					// Start reading the stream
+					const readLoop = async () => {
+						while (true) {
+							const { done, value } = await reader.read();
+							if (done) break;
+							if (value) {
+								controller.enqueue(value);
+							}
+						}
+					};
 
-		// Otherwise, just return the run ID
-		console.log("No stream available, returning JSON with runId:", runId);
-		return NextResponse.json({
-			runId,
-			status: "started",
+					// Race between stream completion and workflow completion
+					await Promise.race([readLoop(), run.returnValue]);
+
+					// Give a moment for any final stream data
+					await new Promise((resolve) => setTimeout(resolve, 100));
+
+					// Close the stream
+					reader.releaseLock();
+					controller.close();
+				} catch (error) {
+					console.error("Error in workflow stream:", error);
+					controller.error(error);
+				}
+			},
+		});
+
+		return new Response(stream, {
+			headers: {
+				"Content-Type": "text/event-stream",
+				"Cache-Control": "no-cache",
+				Connection: "keep-alive",
+				"X-Workflow-Run-Id": run.runId,
+			},
 		});
 	} catch (error) {
 		console.error("Error starting workflow:", error);

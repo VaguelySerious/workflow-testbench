@@ -41,7 +41,10 @@ export default function Home() {
 				}
 
 				const { done, value } = await reader.read();
-				if (done) break;
+
+				if (done) {
+					break;
+				}
 
 				const chunk = decoder.decode(value, { stream: true });
 				const lines = chunk.split("\n").filter((line) => line.trim());
@@ -83,10 +86,11 @@ export default function Home() {
 
 	const startWorkflow = async (workflowName: string, args: unknown[]) => {
 		let runId: string | null = null;
+		let tempId = "";
 
 		try {
 			// Create invocation with "invoked" status
-			const tempId = `temp-${crypto.randomUUID()}`;
+			tempId = `temp-${crypto.randomUUID()}`;
 			addLog("info", `Starting workflow: ${workflowName}`);
 			addInvocation(tempId, workflowName);
 
@@ -111,60 +115,45 @@ export default function Home() {
 				return;
 			}
 
-			// Check if this is a streaming response or JSON response
+			// Check if this is a streaming response
 			const contentType = response.headers.get("Content-Type");
 			const isStream = contentType?.includes("text/event-stream");
 
-			if (isStream) {
-				// Streaming response
-				runId = response.headers.get("X-Workflow-Run-Id");
-
-				if (!runId) {
-					const errorMsg = "No run ID returned from server";
-					addLog("error", errorMsg);
-					updateInvocationStatus(tempId, "error", undefined, errorMsg);
-					return;
-				}
-
-				// Update with real run ID and "streaming" status
-				setInvocations((prev) =>
-					prev.map((inv) =>
-						inv.runId === tempId
-							? { ...inv, runId: runId as string, status: "streaming" as const }
-							: inv,
-					),
-				);
-
-				addLog("info", `Started run ${runId}`, runId);
-
-				// Read the stream
-				const reader = response.body?.getReader();
-				if (reader) {
-					await readStream(runId, reader);
-				}
-			} else {
-				// JSON response
-				const data = await response.json();
-				runId = data.runId;
-
-				if (!runId) {
-					const errorMsg = "No run ID returned from server";
-					addLog("error", errorMsg);
-					updateInvocationStatus(tempId, "error", undefined, errorMsg);
-					return;
-				}
-
-				// Update with real run ID
-				setInvocations((prev) =>
-					prev.map((inv) =>
-						inv.runId === tempId
-							? { ...inv, runId: runId as string, status: "streaming" as const }
-							: inv,
-					),
-				);
-
-				addLog("info", `Started run ${runId} (no stream available)`, runId);
+			if (!isStream) {
+				const errorMsg = "No stream available - expected text/event-stream";
+				addLog("error", errorMsg);
+				updateInvocationStatus(tempId, "error", undefined, errorMsg);
+				return;
 			}
+
+			// Get run ID from header
+			runId = response.headers.get("X-Workflow-Run-Id");
+
+			if (!runId) {
+				const errorMsg = "No run ID returned from server";
+				addLog("error", errorMsg);
+				updateInvocationStatus(tempId, "error", undefined, errorMsg);
+				return;
+			}
+
+			// Update with real run ID and "streaming" status
+			setInvocations((prev) =>
+				prev.map((inv) =>
+					inv.runId === tempId
+						? { ...inv, runId: runId as string, status: "streaming" as const }
+						: inv,
+				),
+			);
+
+			addLog("info", `Started run ${runId}`, runId);
+
+			// Read the stream
+			const reader = response.body?.getReader();
+			if (!reader) {
+				throw new Error("No reader available");
+			}
+
+			await readStream(runId, reader);
 
 			// Wait for the workflow result
 			await awaitWorkflowResult(runId);
@@ -173,6 +162,8 @@ export default function Home() {
 			addLog("error", `Error starting workflow: ${errorMsg}`);
 			if (runId) {
 				updateInvocationStatus(runId, "error", undefined, errorMsg);
+			} else if (tempId) {
+				updateInvocationStatus(tempId, "error", undefined, errorMsg);
 			}
 		}
 	};
