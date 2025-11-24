@@ -114,15 +114,18 @@ export async function promiseAnyWorkflow() {
 // TODO: swc transform should mangle names to avoid conflicts
 async function genReadableStream() {
 	"use step";
+	const writable = getWritable();
+	const writer = writable.getWriter();
 	const encoder = new TextEncoder();
 	return new ReadableStream({
 		async start(controller) {
 			for (let i = 0; i < 10; i++) {
-				console.log("enqueueing", i);
+				await writer.write(encoder.encode(`enqueueing ${i}\n`));
 				controller.enqueue(encoder.encode(`${i}\n`));
 				await new Promise((resolve) => setTimeout(resolve, 1000));
 			}
-			console.log("closing controller");
+			await writer.write(encoder.encode("closing controller\n"));
+			writer.releaseLock();
 			controller.close();
 		},
 	});
@@ -130,9 +133,14 @@ async function genReadableStream() {
 
 export async function readableStreamWorkflow() {
 	"use workflow";
-	console.log("calling genReadableStream");
+	const writable = getWritable();
+	const writer = writable.getWriter();
+	const encoder = new TextEncoder();
+
+	await writer.write(encoder.encode("calling genReadableStream\n"));
 	const stream = await genReadableStream();
-	console.log("genReadableStream returned", stream);
+	await writer.write(encoder.encode(`genReadableStream returned ${stream}\n`));
+	writer.releaseLock();
 	return stream;
 }
 
@@ -176,13 +184,17 @@ export async function webhookWorkflow(
 ) {
 	"use workflow";
 
+	const writable = getWritable();
+	const writer = writable.getWriter();
+	const encoder = new TextEncoder();
+
 	type Payload = { url: string; method: string; body: string };
 	const payloads: Payload[] = [];
 
 	const webhookWithDefaultResponse = createWebhook({ token });
 
 	const res = new Response("Hello from static response!", { status: 402 });
-	console.log("res", res);
+	await writer.write(encoder.encode(`Created response: ${res}\n`));
 	const webhookWithStaticResponse = createWebhook({
 		token: token2,
 		respondWith: res,
@@ -213,6 +225,7 @@ export async function webhookWorkflow(
 		payloads.push({ url: req.url, method: req.method, body });
 	}
 
+	writer.releaseLock();
 	return payloads;
 }
 
@@ -376,33 +389,43 @@ export async function promiseRaceStressTestDelayStep(
 ): Promise<number> {
 	"use step";
 
-	console.log(`sleep`, resp, `/`, dur);
+	const writable = getWritable();
+	const writer = writable.getWriter();
+	const encoder = new TextEncoder();
+
+	await writer.write(encoder.encode(`sleep ${resp} / ${dur}\n`));
 	await new Promise((resolve) => setTimeout(resolve, dur));
 
-	console.log(resp, `done`);
+	await writer.write(encoder.encode(`${resp} done\n`));
+	writer.releaseLock();
 	return resp;
 }
 
 export async function promiseRaceStressTestWorkflow() {
 	"use workflow";
 
+	const writable = getWritable();
+	const writer = writable.getWriter();
+	const encoder = new TextEncoder();
+
 	const promises = new Map<number, Promise<number>>();
 	const done: number[] = [];
 	for (let i = 0; i < 5; i++) {
 		const resp = i;
 		const dur = 1000 * 5 * i; // 5 seconds apart
-		console.log(`sched`, resp, `/`, dur);
+		await writer.write(encoder.encode(`sched ${resp} / ${dur}\n`));
 		promises.set(i, promiseRaceStressTestDelayStep(dur, resp));
 	}
 
 	while (promises.size > 0) {
-		console.log(`promises.size`, promises.size);
+		await writer.write(encoder.encode(`promises.size ${promises.size}\n`));
 		const res = await Promise.race(promises.values());
-		console.log(res);
+		await writer.write(encoder.encode(`${res}\n`));
 		done.push(res);
 		promises.delete(res);
 	}
 
+	writer.releaseLock();
 	return done;
 }
 
@@ -411,26 +434,45 @@ export async function promiseRaceStressTestWorkflow() {
 async function stepThatRetriesAndSucceeds() {
 	"use step";
 	const { attempt } = getStepMetadata();
-	console.log(`stepThatRetriesAndSucceeds - attempt: ${attempt}`);
+	const writable = getWritable();
+	const writer = writable.getWriter();
+	const encoder = new TextEncoder();
+
+	await writer.write(
+		encoder.encode(`stepThatRetriesAndSucceeds - attempt: ${attempt}\n`),
+	);
 
 	// Fail on attempts 1 and 2, succeed on attempt 3
 	if (attempt < 3) {
-		console.log(`Attempt ${attempt} - throwing error to trigger retry`);
+		await writer.write(
+			encoder.encode(`Attempt ${attempt} - throwing error to trigger retry\n`),
+		);
+		writer.releaseLock();
 		throw new Error(`Failed on attempt ${attempt}`);
 	}
 
-	console.log(`Attempt ${attempt} - succeeding`);
+	await writer.write(encoder.encode(`Attempt ${attempt} - succeeding\n`));
+	writer.releaseLock();
 	return attempt;
 }
 
 export async function retryAttemptCounterWorkflow() {
 	"use workflow";
-	console.log("Starting retry attempt counter workflow");
+	const writable = getWritable();
+	const writer = writable.getWriter();
+	const encoder = new TextEncoder();
+
+	await writer.write(
+		encoder.encode("Starting retry attempt counter workflow\n"),
+	);
 
 	// This step should fail twice and succeed on the third attempt
 	const finalAttempt = await stepThatRetriesAndSucceeds();
 
-	console.log(`Workflow completed with final attempt: ${finalAttempt}`);
+	await writer.write(
+		encoder.encode(`Workflow completed with final attempt: ${finalAttempt}\n`),
+	);
+	writer.releaseLock();
 	return { finalAttempt };
 }
 

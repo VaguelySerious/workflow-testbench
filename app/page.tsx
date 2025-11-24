@@ -1,61 +1,87 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useRef } from "react";
 import { WORKFLOW_DEFINITIONS } from "@/app/workflows/definitions";
 import { WorkflowButton } from "@/components/workflow-button";
-import { TerminalLog, type LogEntry } from "@/components/terminal-log";
-
-const STORAGE_KEY = "workflow-logs";
+import { TerminalLog } from "@/components/terminal-log";
+import { InvocationsPanel } from "@/components/invocations-panel";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { useWorkflowStorage } from "@/hooks/use-workflow-storage";
 
 export default function Home() {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [runningWorkflows, setRunningWorkflows] = useState<Set<string>>(
-    new Set()
+  // Track active stream abort controllers
+  const streamAbortControllers = useRef<Map<string, AbortController>>(
+    new Map()
   );
 
-  // Load logs from localStorage on mount
-  useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        setLogs(
-          parsed.map((log: LogEntry) => ({
-            ...log,
-            timestamp: new Date(log.timestamp),
-          }))
-        );
-      } catch (error) {
-        console.error("Failed to parse stored logs:", error);
+  // Use custom hooks for localStorage management
+  const {
+    logs,
+    addLog,
+    invocations,
+    addInvocation,
+    updateInvocationStatus,
+    clearAll,
+  } = useWorkflowStorage();
+
+  const readStream = async (
+    runId: string,
+    reader: ReadableStreamDefaultReader<Uint8Array>
+  ) => {
+    const decoder = new TextDecoder();
+    const abortController = new AbortController();
+    streamAbortControllers.current.set(runId, abortController);
+
+    try {
+      while (true) {
+        if (abortController.signal.aborted) {
+          reader.cancel();
+          break;
+        }
+
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n").filter((line) => line.trim());
+
+        for (const line of lines) {
+          addLog("stream", line, runId);
+        }
       }
+
+      if (!abortController.signal.aborted) {
+        // Stream completed successfully
+        updateInvocationStatus(runId, "stream_complete");
+        addLog("info", "Stream completed", runId);
+      }
+    } catch (streamError) {
+      if (!abortController.signal.aborted) {
+        addLog(
+          "error",
+          `Stream error: ${
+            streamError instanceof Error
+              ? streamError.message
+              : String(streamError)
+          }`,
+          runId
+        );
+        updateInvocationStatus(runId, "disconnected");
+      }
+    } finally {
+      streamAbortControllers.current.delete(runId);
     }
-  }, []);
-
-  // Save logs to localStorage whenever they change
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(logs));
-  }, [logs]);
-
-  const addLog = (type: LogEntry["type"], message: string, runId?: string) => {
-    const entry: LogEntry = {
-      id: crypto.randomUUID(),
-      timestamp: new Date(),
-      type,
-      message,
-      runId,
-    };
-    setLogs((prev) => [...prev, entry]);
-  };
-
-  const clearLogs = () => {
-    setLogs([]);
-    localStorage.removeItem(STORAGE_KEY);
   };
 
   const startWorkflow = async (workflowName: string, args: unknown[]) => {
-    addLog("info", `Starting workflow: ${workflowName}`);
+    let runId: string | null = null;
 
     try {
+      // Create invocation with "invoked" status
+      const tempId = `temp-${crypto.randomUUID()}`;
+      addLog("info", `Starting workflow: ${workflowName}`);
+      addInvocation(tempId, workflowName);
+
       const response = await fetch("/api/workflows/start", {
         method: "POST",
         headers: {
@@ -75,50 +101,38 @@ export default function Home() {
             error.details ? ` - ${error.details}` : ""
           }`
         );
+        updateInvocationStatus(tempId, "disconnected");
         return;
       }
 
-      const runId = response.headers.get("X-Workflow-Run-Id");
+      runId = response.headers.get("X-Workflow-Run-Id");
+
       if (!runId) {
         addLog("error", "No run ID returned from server");
+        updateInvocationStatus(tempId, "error");
         return;
       }
 
+      // Update with real run ID and "streaming" status
+      setInvocations((prev) =>
+        prev.map((inv) =>
+          inv.runId === tempId
+            ? { ...inv, runId: runId as string, status: "streaming" as const }
+            : inv
+        )
+      );
+
       addLog("info", `Started run ${runId}`, runId);
-      setRunningWorkflows((prev) => new Set(prev).add(workflowName));
 
       // Read the stream
       const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
 
       if (reader) {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n").filter((line) => line.trim());
-
-            for (const line of lines) {
-              addLog("stream", line, runId);
-            }
-          }
-        } catch (streamError) {
-          addLog(
-            "error",
-            `Stream error: ${
-              streamError instanceof Error
-                ? streamError.message
-                : String(streamError)
-            }`,
-            runId
-          );
-        }
+        await readStream(runId, reader);
       }
 
       // Wait for the workflow result
-      await awaitWorkflowResult(runId, workflowName);
+      await awaitWorkflowResult(runId);
     } catch (error) {
       addLog(
         "error",
@@ -126,10 +140,65 @@ export default function Home() {
           error instanceof Error ? error.message : String(error)
         }`
       );
+      if (runId) {
+        updateInvocationStatus(runId, "error");
+      }
     }
   };
 
-  const awaitWorkflowResult = async (runId: string, workflowName: string) => {
+  const disconnectStream = (runId: string) => {
+    const controller = streamAbortControllers.current.get(runId);
+    if (controller) {
+      controller.abort();
+      streamAbortControllers.current.delete(runId);
+      updateInvocationStatus(runId, "disconnected");
+      addLog("info", "Disconnected from stream", runId);
+    }
+  };
+
+  const reconnectStream = async (runId: string) => {
+    try {
+      addLog("info", `Reconnecting to stream for run ${runId}`, runId);
+      updateInvocationStatus(runId, "streaming");
+
+      const response = await fetch("/api/workflows/stream", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ runId }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        addLog(
+          "error",
+          `Failed to reconnect: ${error.error || "Unknown error"}${
+            error.details ? ` - ${error.details}` : ""
+          }`,
+          runId
+        );
+        updateInvocationStatus(runId, "disconnected");
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (reader) {
+        await readStream(runId, reader);
+      }
+    } catch (error) {
+      addLog(
+        "error",
+        `Error reconnecting to stream: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        runId
+      );
+      updateInvocationStatus(runId, "disconnected");
+    }
+  };
+
+  const awaitWorkflowResult = async (runId: string) => {
     try {
       const response = await fetch("/api/workflows/await", {
         method: "POST",
@@ -148,6 +217,7 @@ export default function Home() {
           }`,
           runId
         );
+        updateInvocationStatus(runId, "error");
       } else {
         const data = await response.json();
         addLog(
@@ -155,6 +225,7 @@ export default function Home() {
           `Workflow completed: ${JSON.stringify(data.result)}`,
           runId
         );
+        updateInvocationStatus(runId, "done", data.result);
       }
     } catch (error) {
       addLog(
@@ -164,49 +235,54 @@ export default function Home() {
         }`,
         runId
       );
-    } finally {
-      setRunningWorkflows((prev) => {
-        const next = new Set(prev);
-        next.delete(workflowName);
-        return next;
-      });
+      updateInvocationStatus(runId, "error");
     }
   };
 
   return (
-    <div className="min-h-screen bg-background p-8">
-      <div className="max-w-7xl mx-auto space-y-8">
-        <div className="space-y-2">
-          <h1 className="text-4xl font-bold tracking-tight">
-            Workflow DevKit Examples
-          </h1>
-          <p className="text-muted-foreground text-lg">
-            Select a workflow to start a run and view its output in the terminal
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Left Column - Workflow List */}
-          <div className="space-y-4">
-            <h2 className="text-2xl font-semibold">Available Workflows</h2>
-            <div className="grid grid-cols-1 gap-4 max-h-[calc(100vh-280px)] overflow-y-auto pr-2">
-              {WORKFLOW_DEFINITIONS.map((workflow) => (
-                <WorkflowButton
-                  key={workflow.name}
-                  workflow={workflow}
-                  isRunning={runningWorkflows.has(workflow.name)}
-                  onStart={startWorkflow}
-                />
-              ))}
-            </div>
+    <TooltipProvider>
+      <div className="min-h-screen bg-background p-6">
+        <div className="max-w-[1800px] mx-auto space-y-6">
+          <div className="space-y-1">
+            <h1 className="text-3xl font-bold tracking-tight">
+              Workflow DevKit Examples
+            </h1>
+            <p className="text-muted-foreground">
+              Select a workflow to start a run and view its output
+            </p>
           </div>
 
-          {/* Right Column - Terminal Log */}
-          <div className="h-[calc(100vh-200px)]">
-            <TerminalLog logs={logs} onClear={clearLogs} />
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Left Column - Workflow List */}
+            <div className="space-y-3">
+              <h2 className="text-lg font-semibold">Available Workflows</h2>
+              <div className="space-y-2 max-h-[calc(100vh-200px)] overflow-y-auto pr-2">
+                {WORKFLOW_DEFINITIONS.map((workflow) => (
+                  <WorkflowButton
+                    key={workflow.name}
+                    workflow={workflow}
+                    onStart={startWorkflow}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Middle Column - Invocations */}
+            <div className="h-[calc(100vh-180px)]">
+              <InvocationsPanel
+                invocations={invocations}
+                onDisconnect={disconnectStream}
+                onReconnect={reconnectStream}
+              />
+            </div>
+
+            {/* Right Column - Terminal Log */}
+            <div className="h-[calc(100vh-180px)]">
+              <TerminalLog logs={logs} onClear={clearAll} />
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }

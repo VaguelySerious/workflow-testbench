@@ -1,69 +1,68 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { WorkflowDefinition } from "@/app/workflows/definitions";
-import { Loader2 } from "lucide-react";
 
 interface WorkflowButtonProps {
 	workflow: WorkflowDefinition;
-	isRunning: boolean;
 	onStart: (workflowName: string, args: unknown[]) => void;
 }
 
-export function WorkflowButton({
-	workflow,
-	isRunning,
-	onStart,
-}: WorkflowButtonProps) {
+export function WorkflowButton({ workflow, onStart }: WorkflowButtonProps) {
+	const hasArgs = workflow.defaultArgs.length > 0;
+
 	return (
-		<Card className="hover:shadow-lg transition-shadow">
-			<CardHeader>
-				<div className="flex items-center justify-between">
-					<CardTitle className="text-lg">{workflow.displayName}</CardTitle>
-					{isRunning && (
-						<Badge variant="secondary" className="flex items-center gap-1">
-							<Loader2 className="h-3 w-3 animate-spin" />
-							Running
-						</Badge>
-					)}
-				</div>
-				<CardDescription>{workflow.description}</CardDescription>
-			</CardHeader>
-			<CardContent className="space-y-3">
-				{workflow.defaultArgs.length > 0 && (
-					<div className="text-xs space-y-1">
-						<div className="text-muted-foreground font-medium">
-							Default Arguments:
+		<Card className="hover:shadow-md transition-shadow p-3">
+			<div className="flex items-center justify-between gap-3">
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="flex-1 min-w-0 cursor-help">
+							<div className="flex items-baseline gap-2">
+								<h3 className="text-sm font-semibold truncate">
+									{workflow.displayName}
+								</h3>
+								{hasArgs && (
+									<code className="text-xs text-muted-foreground">
+										({workflow.defaultArgs.length} arg
+										{workflow.defaultArgs.length !== 1 ? "s" : ""})
+									</code>
+								)}
+							</div>
+							<p className="text-xs text-muted-foreground line-clamp-1">
+								{workflow.description}
+							</p>
 						</div>
-						<code className="block bg-muted px-2 py-1 rounded text-xs overflow-x-auto">
-							{JSON.stringify(workflow.defaultArgs, null, 2)}
-						</code>
-					</div>
-				)}
+					</TooltipTrigger>
+					<TooltipContent side="right" className="max-w-md">
+						<div className="space-y-1">
+							<div className="font-semibold">{workflow.displayName}</div>
+							{hasArgs ? (
+								<>
+									<div className="text-xs opacity-80">Default Arguments:</div>
+									<pre className="text-xs bg-black/20 p-2 rounded overflow-x-auto">
+										{JSON.stringify(workflow.defaultArgs, null, 2)}
+									</pre>
+								</>
+							) : (
+								<div className="text-xs opacity-80">No arguments required</div>
+							)}
+						</div>
+					</TooltipContent>
+				</Tooltip>
 				<Button
+					size="sm"
 					onClick={() => onStart(workflow.name, workflow.defaultArgs)}
-					disabled={isRunning}
-					className="w-full"
+					className="shrink-0"
 				>
-					{isRunning ? (
-						<>
-							<Loader2 className="h-4 w-4 animate-spin" />
-							Running...
-						</>
-					) : (
-						"Start Workflow"
-					)}
+					Start
 				</Button>
-			</CardContent>
+			</div>
 		</Card>
 	);
 }
-

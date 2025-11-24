@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { start } from "workflow/api";
+import { start, getWorkflowRun } from "workflow/api";
 import * as workflows from "@/app/workflows/examples";
 import { WORKFLOW_DEFINITIONS, type WorkflowName } from "@/app/workflows/definitions";
 
@@ -33,22 +33,31 @@ export async function POST(request: NextRequest) {
 		const workflowArgs = args !== undefined ? args : definition.defaultArgs;
 
 		// Start the workflow
-		const run = await start(workflowFn, workflowArgs);
+		const runId = await start(workflowFn, workflowArgs);
+		const runIdString = typeof runId === 'string' ? runId : (runId as any)?.id || String(runId);
+
+		// Get the workflow run to access streaming
+		const run = await getWorkflowRun(runIdString);
+		
+		if (!run) {
+			return NextResponse.json(
+				{ error: "Failed to get workflow run" },
+				{ status: 500 }
+			);
+		}
 
 		// Get the stream
 		const stream = run.stream();
 
 		// Create a response with the stream
-		const response = new Response(stream, {
+		return new Response(stream, {
 			headers: {
 				"Content-Type": "text/event-stream",
 				"Cache-Control": "no-cache",
 				"Connection": "keep-alive",
-				"X-Workflow-Run-Id": run.id,
+				"X-Workflow-Run-Id": runIdString,
 			},
 		});
-
-		return response;
 	} catch (error) {
 		console.error("Error starting workflow:", error);
 		return NextResponse.json(
