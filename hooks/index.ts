@@ -4,4 +4,5 @@ export {
   useWorkflowInvocations,
   useWorkflowStorage,
 } from "./use-workflow-storage";
+export type { Invocation, InvocationStatus } from "./use-workflow-storage";
 

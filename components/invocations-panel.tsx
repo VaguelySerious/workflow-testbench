@@ -14,18 +14,23 @@ import {
 	XCircle,
 	Unplug,
 	RefreshCw,
+	AlertCircle,
 } from "lucide-react";
+
+export type InvocationStatus =
+	| "invoked"
+	| "reconnecting"
+	| "streaming"
+	| "disconnected"
+	| "stream_complete"
+	| "done"
+	| "error" // Workflow returned an error result (orange)
+	| "failed"; // Client/API error on our side (red)
 
 export interface Invocation {
 	runId: string;
 	workflowName: string;
-	status:
-		| "invoked"
-		| "streaming"
-		| "disconnected"
-		| "stream_complete"
-		| "done"
-		| "error";
+	status: InvocationStatus;
 	startTime: Date;
 	endTime?: Date;
 	result?: unknown;
@@ -52,39 +57,53 @@ export function InvocationsPanel({
 		});
 	};
 
-	const getStatusIcon = (status: Invocation["status"]) => {
+	const getStatusIcon = (status: InvocationStatus) => {
 		switch (status) {
 			case "invoked":
+			case "reconnecting":
 			case "streaming":
 				return <Loader2 className="h-3 w-3 animate-spin" />;
 			case "done":
-				return <CheckCircle2 className="h-3 w-3" />;
-			case "error":
-			case "disconnected":
-				return <XCircle className="h-3 w-3" />;
 			case "stream_complete":
 				return <CheckCircle2 className="h-3 w-3" />;
+			case "error":
+				return <AlertCircle className="h-3 w-3" />;
+			case "disconnected":
+			case "failed":
+				return <XCircle className="h-3 w-3" />;
+		}
+	};
+
+	const getStatusStyle = (status: InvocationStatus): string => {
+		switch (status) {
+			case "invoked":
+			case "reconnecting":
+			case "streaming":
+				return "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/50 dark:text-blue-300";
+			case "stream_complete":
+			case "done":
+				return "bg-green-100 text-green-800 border-green-200 dark:bg-green-900/50 dark:text-green-300";
+			case "error": // Workflow error - orange
+				return "bg-orange-100 text-orange-800 border-orange-200 dark:bg-orange-900/50 dark:text-orange-300";
+			case "disconnected":
+				return "bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300";
+			case "failed": // Client/API error - red
+				return "bg-red-100 text-red-800 border-red-200 dark:bg-red-900/50 dark:text-red-300";
 		}
 	};
 
 	const getStatusBadge = (
-		status: Invocation["status"],
+		status: InvocationStatus,
 		result?: unknown,
 		error?: string,
 	) => {
-		const variants = {
-			invoked: "secondary" as const,
-			streaming: "secondary" as const,
-			stream_complete: "default" as const,
-			done: "default" as const,
-			error: "destructive" as const,
-			disconnected: "destructive" as const,
-		};
-
 		const statusLabel = status.replace("_", " ");
 
 		const badge = (
-			<Badge variant={variants[status]} className="flex items-center gap-1">
+			<Badge
+				variant="outline"
+				className={`flex items-center gap-1 ${getStatusStyle(status)}`}
+			>
 				{getStatusIcon(status)}
 				{statusLabel}
 			</Badge>
@@ -105,15 +124,32 @@ export function InvocationsPanel({
 			);
 		}
 
-		if ((status === "error" || status === "disconnected") && error) {
+		if (
+			(status === "error" ||
+				status === "disconnected" ||
+				status === "failed") &&
+			error
+		) {
+			const tooltipBg =
+				status === "failed"
+					? "bg-red-600"
+					: status === "error"
+						? "bg-orange-600"
+						: "";
 			return (
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<div className="cursor-help">{badge}</div>
 					</TooltipTrigger>
-					<TooltipContent side="left" className="max-w-md bg-destructive">
+					<TooltipContent side="left" className={`max-w-md ${tooltipBg}`}>
 						<div className="space-y-1">
-							<div className="font-semibold">Error Details:</div>
+							<div className="font-semibold">
+								{status === "failed"
+									? "API/Client Error:"
+									: status === "error"
+										? "Workflow Error:"
+										: "Disconnected:"}
+							</div>
 							<div className="text-xs whitespace-pre-wrap">{error}</div>
 						</div>
 					</TooltipContent>
@@ -138,10 +174,11 @@ export function InvocationsPanel({
 						</div>
 					) : (
 						invocations.map((invocation) => {
-							const isStreaming = invocation.status === "streaming";
-							const isDisconnected = invocation.status === "disconnected";
+							const isActive =
+								invocation.status === "streaming" ||
+								invocation.status === "reconnecting";
 							const canReconnect =
-								isDisconnected ||
+								invocation.status === "disconnected" ||
 								invocation.status === "stream_complete" ||
 								invocation.status === "done";
 
@@ -152,7 +189,9 @@ export function InvocationsPanel({
 								>
 									<div className="flex items-center justify-between gap-2">
 										<span className="font-mono text-xs truncate flex-1">
-											{invocation.runId}...
+											{invocation.runId.startsWith("temp-")
+												? invocation.runId
+												: invocation.runId.substring(0, 16) + "..."}
 										</span>
 										<div className="flex items-center gap-1">
 											{getStatusBadge(
@@ -160,7 +199,7 @@ export function InvocationsPanel({
 												invocation.result,
 												invocation.error,
 											)}
-											{isStreaming && onDisconnect && (
+											{isActive && onDisconnect && (
 												<Tooltip>
 													<TooltipTrigger asChild>
 														<Button
@@ -177,7 +216,7 @@ export function InvocationsPanel({
 													</TooltipContent>
 												</Tooltip>
 											)}
-											{canReconnect && onReconnect && (
+											{canReconnect && !isActive && onReconnect && (
 												<Tooltip>
 													<TooltipTrigger asChild>
 														<Button

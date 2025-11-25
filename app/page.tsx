@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useEffect, useCallback } from "react";
 import { WORKFLOW_DEFINITIONS } from "@/app/workflows/definitions";
 import { WorkflowButton } from "@/components/workflow-button";
 import { TerminalLog } from "@/components/terminal-log";
@@ -14,76 +14,210 @@ export default function Home() {
 		new Map(),
 	);
 
+	// Track which runs we've attempted to reconnect to (to avoid duplicates)
+	const reconnectionAttempts = useRef<Set<string>>(new Set());
+
 	// Use custom hooks for localStorage management
 	const {
 		logs,
 		addLog,
 		invocations,
-		setInvocations,
 		addInvocation,
 		updateInvocationStatus,
+		updateInvocationRunId,
 		clearAll,
+		isHydrated,
 	} = useWorkflowStorage();
 
-	const readStream = async (
-		runId: string,
-		reader: ReadableStreamDefaultReader<Uint8Array>,
-	) => {
-		const decoder = new TextDecoder();
-		const abortController = new AbortController();
-		streamAbortControllers.current.set(runId, abortController);
+	// Stream reading helper
+	const readStream = useCallback(
+		async (runId: string, reader: ReadableStreamDefaultReader<Uint8Array>) => {
+			const decoder = new TextDecoder();
+			const abortController = new AbortController();
+			streamAbortControllers.current.set(runId, abortController);
 
-		try {
-			while (true) {
-				if (abortController.signal.aborted) {
-					reader.cancel();
-					break;
+			try {
+				while (true) {
+					if (abortController.signal.aborted) {
+						reader.cancel();
+						break;
+					}
+
+					const { done, value } = await reader.read();
+
+					if (done) {
+						break;
+					}
+
+					const chunk = decoder.decode(value, { stream: true });
+					const lines = chunk.split("\n").filter((line) => line.trim());
+
+					for (const line of lines) {
+						addLog("stream", line, runId);
+					}
 				}
 
-				const { done, value } = await reader.read();
-
-				if (done) {
-					break;
+				if (!abortController.signal.aborted) {
+					// Stream completed successfully
+					updateInvocationStatus(runId, "stream_complete");
+					addLog("info", "Stream completed", runId);
 				}
-
-				const chunk = decoder.decode(value, { stream: true });
-				const lines = chunk.split("\n").filter((line) => line.trim());
-
-				for (const line of lines) {
-					addLog("stream", line, runId);
-				}
-			}
-
-			if (!abortController.signal.aborted) {
-				// Stream completed successfully
-				updateInvocationStatus(runId, "stream_complete");
-				addLog("info", "Stream completed", runId);
-			}
-		} catch (streamError) {
-			if (!abortController.signal.aborted) {
-				addLog(
-					"error",
-					`Stream error: ${
+			} catch (streamError) {
+				if (!abortController.signal.aborted) {
+					const errorMsg =
 						streamError instanceof Error
 							? streamError.message
-							: String(streamError)
-					}`,
-					runId,
-				);
-				updateInvocationStatus(
-					runId,
-					"disconnected",
-					undefined,
-					streamError instanceof Error
-						? streamError.message
-						: String(streamError),
-				);
+							: String(streamError);
+					addLog("error", `Stream error: ${errorMsg}`, runId);
+					updateInvocationStatus(runId, "disconnected", undefined, errorMsg);
+				}
+			} finally {
+				streamAbortControllers.current.delete(runId);
 			}
-		} finally {
-			streamAbortControllers.current.delete(runId);
-		}
-	};
+		},
+		[addLog, updateInvocationStatus],
+	);
 
+	// Await workflow result
+	const awaitWorkflowResult = useCallback(
+		async (runId: string) => {
+			try {
+				const response = await fetch("/api/workflows/await", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({ runId }),
+				});
+
+				if (!response.ok) {
+					const error = await response.json();
+					const errorMsg = `${error.error || "Unknown error"}${
+						error.details ? ` - ${error.details}` : ""
+					}`;
+					addLog("error", `API error awaiting result: ${errorMsg}`, runId);
+					// Use "failed" for API errors (our side)
+					updateInvocationStatus(runId, "failed", undefined, errorMsg);
+				} else {
+					const data = await response.json();
+
+					// Check if the workflow result itself is an error
+					const isWorkflowError =
+						data.result &&
+						typeof data.result === "object" &&
+						(data.result.error || data.result instanceof Error);
+
+					if (isWorkflowError) {
+						const errorMsg =
+							data.result.error || data.result.message || "Workflow error";
+						addLog("error", `Workflow returned error: ${errorMsg}`, runId);
+						// Use "error" for workflow errors (the workflow returned an error)
+						updateInvocationStatus(runId, "error", data.result, errorMsg);
+					} else {
+						addLog(
+							"result",
+							`Workflow completed: ${JSON.stringify(data.result)}`,
+							runId,
+						);
+						updateInvocationStatus(runId, "done", data.result);
+					}
+				}
+			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				addLog("error", `Failed to await result: ${errorMsg}`, runId);
+				// Use "failed" for client/network errors
+				updateInvocationStatus(runId, "failed", undefined, errorMsg);
+			}
+		},
+		[addLog, updateInvocationStatus],
+	);
+
+	// Reconnect to a stream (or just await result if stream is done)
+	const reconnectToRun = useCallback(
+		async (runId: string, silent = false) => {
+			// First try to reconnect to the stream
+			try {
+				if (!silent) {
+					addLog("info", `Reconnecting to run ${runId}...`, runId);
+				}
+				updateInvocationStatus(runId, "streaming");
+
+				const streamResponse = await fetch("/api/workflows/stream", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({ runId }),
+				});
+
+				if (streamResponse.ok) {
+					// Stream is still available - read it
+					const reader = streamResponse.body?.getReader();
+					if (reader) {
+						await readStream(runId, reader);
+					}
+				} else {
+					// Stream not available - that's okay, workflow may have completed
+					if (!silent) {
+						addLog("info", `Stream ended, checking result...`, runId);
+					}
+				}
+			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				if (!silent) {
+					addLog("error", `Error reconnecting to stream: ${errorMsg}`, runId);
+				}
+			}
+
+			// Always try to await the result
+			await awaitWorkflowResult(runId);
+		},
+		[addLog, updateInvocationStatus, readStream, awaitWorkflowResult],
+	);
+
+	// Manual reconnect handler (from UI button)
+	const reconnectStream = useCallback(
+		async (runId: string) => {
+			// Reset the reconnection tracking for manual reconnects
+			reconnectionAttempts.current.delete(runId);
+			await reconnectToRun(runId, false);
+		},
+		[reconnectToRun],
+	);
+
+	// Auto-reconnect on page load for any "reconnecting" invocations
+	useEffect(() => {
+		// Wait for hydration to complete
+		if (!isHydrated) return;
+
+		const reconnectingInvocations = invocations.filter(
+			(inv) => inv.status === "reconnecting",
+		);
+
+		for (const inv of reconnectingInvocations) {
+			// Skip if we've already attempted this run
+			if (reconnectionAttempts.current.has(inv.runId)) continue;
+
+			// Mark as attempted
+			reconnectionAttempts.current.add(inv.runId);
+
+			if (inv.runId.startsWith("temp-")) {
+				// temp IDs can't be reconnected - mark as failed
+				updateInvocationStatus(
+					inv.runId,
+					"failed",
+					undefined,
+					"Lost connection before receiving run ID",
+				);
+			} else {
+				// Reconnect in the background
+				addLog("info", `Auto-reconnecting to ${inv.runId}...`, inv.runId);
+				reconnectToRun(inv.runId, true);
+			}
+		}
+	}, [isHydrated, invocations, reconnectToRun, addLog, updateInvocationStatus]);
+
+	// Start a workflow
 	const startWorkflow = async (workflowName: string, args: unknown[]) => {
 		let runId: string | null = null;
 		let tempId = "";
@@ -110,8 +244,9 @@ export default function Home() {
 				const errorMsg = `${error.error || "Unknown error"}${
 					error.details ? ` - ${error.details}` : ""
 				}`;
-				addLog("error", `Failed to start workflow: ${errorMsg}`);
-				updateInvocationStatus(tempId, "error", undefined, errorMsg);
+				addLog("error", `API error starting workflow: ${errorMsg}`);
+				// Use "failed" for API errors
+				updateInvocationStatus(tempId, "failed", undefined, errorMsg);
 				return;
 			}
 
@@ -122,7 +257,7 @@ export default function Home() {
 			if (!isStream) {
 				const errorMsg = "No stream available - expected text/event-stream";
 				addLog("error", errorMsg);
-				updateInvocationStatus(tempId, "error", undefined, errorMsg);
+				updateInvocationStatus(tempId, "failed", undefined, errorMsg);
 				return;
 			}
 
@@ -132,19 +267,12 @@ export default function Home() {
 			if (!runId) {
 				const errorMsg = "No run ID returned from server";
 				addLog("error", errorMsg);
-				updateInvocationStatus(tempId, "error", undefined, errorMsg);
+				updateInvocationStatus(tempId, "failed", undefined, errorMsg);
 				return;
 			}
 
 			// Update with real run ID and "streaming" status
-			setInvocations((prev) =>
-				prev.map((inv) =>
-					inv.runId === tempId
-						? { ...inv, runId: runId as string, status: "streaming" as const }
-						: inv,
-				),
-			);
-
+			updateInvocationRunId(tempId, runId, "streaming");
 			addLog("info", `Started run ${runId}`, runId);
 
 			// Read the stream
@@ -159,15 +287,16 @@ export default function Home() {
 			await awaitWorkflowResult(runId);
 		} catch (error) {
 			const errorMsg = error instanceof Error ? error.message : String(error);
-			addLog("error", `Error starting workflow: ${errorMsg}`);
-			if (runId) {
-				updateInvocationStatus(runId, "error", undefined, errorMsg);
-			} else if (tempId) {
-				updateInvocationStatus(tempId, "error", undefined, errorMsg);
+			addLog("error", `Failed to start workflow: ${errorMsg}`);
+			// Use "failed" for client errors
+			const targetId = runId || tempId;
+			if (targetId) {
+				updateInvocationStatus(targetId, "failed", undefined, errorMsg);
 			}
 		}
 	};
 
+	// Disconnect from a stream
 	const disconnectStream = (runId: string) => {
 		const controller = streamAbortControllers.current.get(runId);
 		if (controller) {
@@ -175,73 +304,6 @@ export default function Home() {
 			streamAbortControllers.current.delete(runId);
 			updateInvocationStatus(runId, "disconnected");
 			addLog("info", "Disconnected from stream", runId);
-		}
-	};
-
-	const reconnectStream = async (runId: string) => {
-		try {
-			addLog("info", `Reconnecting to stream for run ${runId}`, runId);
-			updateInvocationStatus(runId, "streaming");
-
-			const response = await fetch("/api/workflows/stream", {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({ runId }),
-			});
-
-			if (!response.ok) {
-				const error = await response.json();
-				const errorMsg = `${error.error || "Unknown error"}${
-					error.details ? ` - ${error.details}` : ""
-				}`;
-				addLog("error", `Failed to reconnect: ${errorMsg}`, runId);
-				updateInvocationStatus(runId, "disconnected", undefined, errorMsg);
-				return;
-			}
-
-			const reader = response.body?.getReader();
-			if (reader) {
-				await readStream(runId, reader);
-			}
-		} catch (error) {
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			addLog("error", `Error reconnecting to stream: ${errorMsg}`, runId);
-			updateInvocationStatus(runId, "disconnected", undefined, errorMsg);
-		}
-	};
-
-	const awaitWorkflowResult = async (runId: string) => {
-		try {
-			const response = await fetch("/api/workflows/await", {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({ runId }),
-			});
-
-			if (!response.ok) {
-				const error = await response.json();
-				const errorMsg = `${error.error || "Unknown error"}${
-					error.details ? ` - ${error.details}` : ""
-				}`;
-				addLog("error", `Failed to await workflow result: ${errorMsg}`, runId);
-				updateInvocationStatus(runId, "error", undefined, errorMsg);
-			} else {
-				const data = await response.json();
-				addLog(
-					"result",
-					`Workflow completed: ${JSON.stringify(data.result)}`,
-					runId,
-				);
-				updateInvocationStatus(runId, "done", data.result);
-			}
-		} catch (error) {
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			addLog("error", `Error awaiting workflow result: ${errorMsg}`, runId);
-			updateInvocationStatus(runId, "error", undefined, errorMsg);
 		}
 	};
 

@@ -11,7 +11,7 @@ export function useLocalStorage<T>(
     serializer?: (value: T) => string;
     deserializer?: (value: string) => T;
   }
-): [T, (value: T | ((prev: T) => T)) => void, () => void] {
+): [T, (value: T | ((prev: T) => T)) => void, () => void, boolean] {
   const serializer = options?.serializer ?? JSON.stringify;
   const deserializer = options?.deserializer ?? JSON.parse;
 
@@ -59,6 +59,5 @@ export function useLocalStorage<T>(
     }
   }, [key, initialValue]);
 
-  return [storedValue, setStoredValue, clearValue];
+  return [storedValue, setStoredValue, clearValue, isHydrated];
 }
-

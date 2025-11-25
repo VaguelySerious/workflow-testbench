@@ -1,16 +1,25 @@
 import { useCallback } from "react";
 import { useLocalStorage } from "./use-local-storage";
 import type { LogEntry } from "@/components/terminal-log";
-import type { Invocation } from "@/components/invocations-panel";
+import type { Invocation, InvocationStatus } from "@/components/invocations-panel";
+
+// Re-export types for convenience
+export type { Invocation, InvocationStatus };
 
 const STORAGE_KEY = "workflow-logs";
 const INVOCATIONS_KEY = "workflow-invocations";
+
+// Statuses that indicate an active/pending workflow that needs reconnection
+const ACTIVE_STATUSES: InvocationStatus[] = ["invoked", "streaming", "reconnecting"];
+
+// Statuses that should have an end time set
+const TERMINAL_STATUSES: InvocationStatus[] = ["done", "error", "failed"];
 
 /**
  * Hook for managing workflow logs with localStorage persistence
  */
 export function useWorkflowLogs() {
-  const [logs, setLogs, clearLogsStorage] = useLocalStorage<LogEntry[]>(
+  const [logs, setLogs, clearLogsStorage, isHydrated] = useLocalStorage<LogEntry[]>(
     STORAGE_KEY,
     [],
     {
@@ -38,22 +47,31 @@ export function useWorkflowLogs() {
     [setLogs]
   );
 
-  return { logs, setLogs, addLog, clearLogs: clearLogsStorage };
+  return { logs, setLogs, addLog, clearLogs: clearLogsStorage, isLogsHydrated: isHydrated };
 }
 
 /**
  * Hook for managing workflow invocations with localStorage persistence
+ * Automatically marks active invocations as "reconnecting" during deserialization
  */
 export function useWorkflowInvocations() {
-  const [invocations, setInvocations, clearInvocationsStorage] =
+  const [invocations, setInvocations, clearInvocationsStorage, isHydrated] =
     useLocalStorage<Invocation[]>(INVOCATIONS_KEY, [], {
       deserializer: (value: string) => {
         const parsed = JSON.parse(value);
-        return parsed.map((inv: Invocation) => ({
-          ...inv,
-          startTime: new Date(inv.startTime),
-          endTime: inv.endTime ? new Date(inv.endTime) : undefined,
-        }));
+        // Mark any active invocations as "reconnecting" when loading from storage
+        return parsed.map((inv: Invocation) => {
+          const status = inv.status as InvocationStatus;
+          return {
+            ...inv,
+            startTime: new Date(inv.startTime),
+            endTime: inv.endTime ? new Date(inv.endTime) : undefined,
+            // If the status was active (invoked/streaming), mark it as reconnecting
+            status: ACTIVE_STATUSES.includes(status) && status !== "reconnecting"
+              ? "reconnecting"
+              : status,
+          };
+        });
       },
     });
 
@@ -73,7 +91,7 @@ export function useWorkflowInvocations() {
   const updateInvocationStatus = useCallback(
     (
       runId: string,
-      status: Invocation["status"],
+      status: InvocationStatus,
       result?: unknown,
       error?: string
     ) => {
@@ -83,12 +101,28 @@ export function useWorkflowInvocations() {
             ? {
                 ...inv,
                 status,
-                endTime:
-                  status === "done" || status === "error"
-                    ? new Date()
-                    : inv.endTime,
+                endTime: TERMINAL_STATUSES.includes(status)
+                  ? new Date()
+                  : inv.endTime,
                 result: result !== undefined ? result : inv.result,
                 error: error !== undefined ? error : inv.error,
+              }
+            : inv
+        )
+      );
+    },
+    [setInvocations]
+  );
+
+  const updateInvocationRunId = useCallback(
+    (oldRunId: string, newRunId: string, newStatus?: InvocationStatus) => {
+      setInvocations((prev) =>
+        prev.map((inv) =>
+          inv.runId === oldRunId
+            ? {
+                ...inv,
+                runId: newRunId,
+                status: newStatus ?? inv.status,
               }
             : inv
         )
@@ -102,7 +136,9 @@ export function useWorkflowInvocations() {
     setInvocations,
     addInvocation,
     updateInvocationStatus,
+    updateInvocationRunId,
     clearInvocations: clearInvocationsStorage,
+    isInvocationsHydrated: isHydrated,
   };
 }
 
@@ -118,10 +154,13 @@ export function useWorkflowStorage() {
     invocationsHook.clearInvocations();
   }, [logsHook, invocationsHook]);
 
+  // Hydration is complete when both storage sources are hydrated
+  const isHydrated = logsHook.isLogsHydrated && invocationsHook.isInvocationsHydrated;
+
   return {
     ...logsHook,
     ...invocationsHook,
+    isHydrated,
     clearAll,
   };
 }
-
