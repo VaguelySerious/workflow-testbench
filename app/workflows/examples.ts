@@ -47,6 +47,14 @@ export async function addTenWorkflow(input: number) {
 
 //////////////////////////////////////////////////////////
 
+export async function topLevelErrorWorkflow() {
+	"use workflow";
+	await writeToStream("About to throw top-level error\n");
+	throw new Error("Top-level workflow error");
+}
+
+//////////////////////////////////////////////////////////
+
 // Helper functions to test nested stack traces
 function deepFunction() {
 	throw new Error("Error from deeply nested function");

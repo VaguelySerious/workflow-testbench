@@ -13,6 +13,12 @@ export const WORKFLOW_DEFINITIONS: WorkflowDefinition[] = [
 		defaultArgs: [5],
 	},
 	{
+		name: "topLevelErrorWorkflow",
+		displayName: "Top-Level Error",
+		description: "Throws an error directly at the workflow top level",
+		defaultArgs: [],
+	},
+	{
 		name: "nestedErrorWorkflow",
 		displayName: "Nested Error",
 		description: "Tests error handling with deeply nested function calls",
@@ -133,4 +139,3 @@ export const WORKFLOW_DEFINITIONS: WorkflowDefinition[] = [
 ];
 
 export type WorkflowName = (typeof WORKFLOW_DEFINITIONS)[number]["name"];
-
